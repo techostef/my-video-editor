@@ -3,7 +3,7 @@ import type { UploadResponse } from '../types';
 
 // Android emulator: use 10.0.2.2 instead of localhost
 // Physical device: use your machine's local IP, e.g. http://192.168.1.x:3000
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://192.168.1.8:3000';
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://192.168.1.11:3000';
 
 const api = axios.create({
   baseURL: BASE_URL,

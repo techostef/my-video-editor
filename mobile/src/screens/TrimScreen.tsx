@@ -122,9 +122,7 @@ export default function TrimScreen({ navigation, route }: Props) {
   };
 
   // --- Derived ---
-  const startTime = startFrac * duration;
-  const endTime = endFrac * duration;
-  const trimDuration = endTime - startTime;
+  const trimDuration = (endFrac - startFrac) * duration;
   const playheadFrac = duration > 0 ? currentTime / duration : 0;
 
   return (
@@ -141,12 +139,29 @@ export default function TrimScreen({ navigation, route }: Props) {
         useNativeControls={false}
       />
 
-      {/* ── Duration badge ── */}
-      <View style={styles.durationRow}>
-        <Text style={styles.durationText}>
-          Selected: <Text style={styles.durationHighlight}>{fmtCompact(trimDuration)}</Text>
-          {'  '}|{'  '}Total: {fmtCompact(duration)}
-        </Text>
+      {/* ── Controls bar (CapCut-style) ── */}
+      <View style={styles.controlsBar}>
+        <View style={styles.controlsSide}>
+          <Text style={styles.timeText}>
+            {fmtCompact(currentTime)}
+            <Text style={styles.timeDim}> / {fmtCompact(duration)}</Text>
+          </Text>
+        </View>
+ 
+        <TouchableOpacity
+          style={styles.playBtn}
+          onPress={togglePlay}
+          disabled={loading}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.playIcon}>{isPlaying ? '⏸' : '▶'}</Text>
+        </TouchableOpacity>
+ 
+        <View style={[styles.controlsSide, styles.controlsSideRight]}>
+          <Text style={styles.trimBadge}>
+            {fmtCompact(trimDuration)}
+          </Text>
+        </View>
       </View>
 
       {/* ── Zoomable Timeline ── */}
@@ -162,42 +177,53 @@ export default function TrimScreen({ navigation, route }: Props) {
         minTrimSecs={MIN_TRIM_SECS}
       />
 
-      {/* ── Play button ── */}
-      <View style={styles.playRow}>
-        <TouchableOpacity style={styles.playBtn} onPress={togglePlay} disabled={loading}>
-          <Text style={styles.playBtnText}>{isPlaying ? '⏸' : '▶'}</Text>
-        </TouchableOpacity>
-      </View>
-
       {/* ── Status / loading ── */}
       {loading && (
         <View style={styles.loadingRow}>
-          <ActivityIndicator color="#6c63ff" size="small" />
+           <ActivityIndicator color="#fff" size="small" />
           <Text style={styles.statusText}>{statusMsg}</Text>
         </View>
       )}
 
-      {/* ── Action buttons ── */}
-      <View style={styles.actionRow}>
-        <TouchableOpacity
-          style={[styles.skipBtn, loading && styles.disabled]}
-          onPress={() => handleContinue(true)}
-          disabled={loading}
-        >
-          <Text style={styles.skipBtnText}>Use Full Video</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.continueBtn, loading && styles.disabled]}
-          onPress={() => handleContinue(false)}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator color="#fff" size="small" />
-          ) : (
-            <Text style={styles.continueBtnText}>Trim & Continue →</Text>
-          )}
-        </TouchableOpacity>
+      {/* ── Bottom toolbar (CapCut-style) ── */}
+      <View style={styles.bottomToolbar}>
+        <View style={styles.toolbarDivider} />
+        <View style={styles.toolbarRow}>
+          <TouchableOpacity
+            style={[styles.toolbarItem, loading && styles.disabled]}
+            onPress={() => handleContinue(true)}
+            disabled={loading}
+          >
+            <Text style={styles.toolbarIcon}>▶️</Text>
+            <Text style={styles.toolbarLabel}>Full Video</Text>
+          </TouchableOpacity>
+ 
+          <TouchableOpacity
+            style={[styles.toolbarItem, loading && styles.disabled]}
+            onPress={() => handleContinue(false)}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color="#fff" size="small" style={{ height: 24 }} />
+            ) : (
+              <Text style={styles.toolbarIcon}>✂️</Text>
+            )}
+            <Text style={[styles.toolbarLabel, styles.toolbarLabelActive]}>Trim</Text>
+          </TouchableOpacity>
+ 
+          <TouchableOpacity
+            style={[styles.toolbarItem, loading && styles.disabled]}
+            onPress={() => handleContinue(false)}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color="#fff" size="small" style={{ height: 24 }} />
+            ) : (
+              <Text style={styles.toolbarIcon}>→</Text>
+            )}
+            <Text style={styles.toolbarLabel}>Continue</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </View>
   );
@@ -213,36 +239,45 @@ const styles = StyleSheet.create({
     aspectRatio: 16 / 9,
     backgroundColor: '#000',
   },
-  durationRow: {
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+  // Controls bar (below video, above timeline)
+  controlsBar: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
   },
-  durationText: {
-    color: '#aaa',
+  controlsSide: {
+    flex: 1,
+  },
+  controlsSideRight: {
+    alignItems: 'flex-end',
+  },
+  timeText: {
+    color: '#fff',
     fontSize: 13,
+    fontWeight: '500',
+    fontVariant: ['tabular-nums'],
   },
-  durationHighlight: {
-    color: '#f5c518',
-    fontWeight: '700',
-  },
-
-  // Play button
-  playRow: {
-    alignItems: 'center',
-    marginTop: 12,
+  timeDim: {
+    color: '#666',
+    fontWeight: '400',
   },
   playBtn: {
-    backgroundColor: '#2a2a2a',
-    borderRadius: 28,
-    width: 52,
-    height: 52,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  playBtnText: {
-    fontSize: 22,
+  playIcon: {
+    fontSize: 20,
     color: '#fff',
+  },
+  trimBadge: {
+    color: '#888',
+    fontSize: 12,
+    fontVariant: ['tabular-nums'],
   },
 
   // Loading
@@ -251,47 +286,51 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    marginTop: 16,
+    marginTop: 12,
   },
   statusText: {
     color: '#aaa',
-    fontSize: 13,
+    fontSize: 12,
     fontStyle: 'italic',
   },
 
-  // Action buttons
-  actionRow: {
+  // Bottom toolbar
+  bottomToolbar: {
+    marginTop: 'auto',paddingBottom: 16,
+  },
+  toolbarDivider: {
+    height: 0.5,
+    backgroundColor: '#2a2a2a',
+    marginBottom: 8,
+  },
+  toolbarRow: {
     flexDirection: 'row',
-    gap: 12,
-    padding: 16,
-    marginTop: 'auto',
-  },
-  skipBtn: {
-    flex: 1,
-    paddingVertical: 16,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: '#555',
+    justifyContent: 'space-around',
     alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 8,
   },
-  skipBtnText: {
-    color: '#ccc',
-    fontSize: 14,
+  toolbarItem: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    minWidth: 64,
+  },
+  toolbarIcon: {
+    fontSize: 22,
+    color: '#fff',
+    marginBottom: 4,
+  },
+  toolbarLabel: {
+    color: '#888',
+    fontSize: 11,
     fontWeight: '500',
   },
-  continueBtn: {
-    flex: 2,
-    paddingVertical: 16,
-    borderRadius: 12,
-    backgroundColor: '#6c63ff',
-    alignItems: 'center',
-  },
-  continueBtnText: {
+  toolbarLabelActive: {
     color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
   },
   disabled: {
-    opacity: 0.45,
+    opacity: 0.4,
   },
 });
