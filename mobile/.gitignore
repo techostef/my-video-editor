@@ -16,6 +16,10 @@ ios/build/
 # Metro
 .metro-health-check*
 
+# Env
+.env
+.env.*
+
 # IDE
 .idea/
 .vscode/

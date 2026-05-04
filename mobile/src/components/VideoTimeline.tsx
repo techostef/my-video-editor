@@ -6,7 +6,6 @@ import {
   ScrollView,
   Image,
   TouchableOpacity,
-  PanResponder,
   Dimensions,
   LayoutChangeEvent,
   NativeSyntheticEvent,
@@ -17,7 +16,6 @@ import * as VideoThumbnails from 'expo-video-thumbnails';
 // ─── Constants ────────────────────────────────────────────────────────────────
 const THUMB_HEIGHT = 56;
 const TICK_ROW_HEIGHT = 22;
-const HANDLE_WIDTH = 14;
 const PX_PER_SEC = 80;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 20;
@@ -44,18 +42,21 @@ function getTickConfig(zoom: number) {
   return { interval: 1, labelEvery: 2, showMs: false };
 }
 
-// ─── Props ────────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export interface TimelineSegment {
+  startFrac: number;
+  endFrac: number;
+  kept: boolean;
+}
 
 interface VideoTimelineProps {
   videoUri: string;
   duration: number;
-  startFrac: number;
-  endFrac: number;
+  segments: TimelineSegment[];
+  selectedSegment: number | null;
   playheadFrac: number;
-  onStartFracChange: (f: number) => void;
-  onEndFracChange: (f: number) => void;
   onSeek: (seconds: number) => void;
-  minTrimSecs?: number;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -63,13 +64,10 @@ interface VideoTimelineProps {
 export default function VideoTimeline({
   videoUri,
   duration,
-  startFrac,
-  endFrac,
+  segments,
+  selectedSegment,
   playheadFrac,
-  onStartFracChange,
-  onEndFracChange,
   onSeek,
-  minTrimSecs = 1,
 }: VideoTimelineProps) {
   const scrollRef = useRef<ScrollView>(null);
   const [containerW, setContainerW] = useState(SCREEN_W - 32);
@@ -79,22 +77,11 @@ export default function VideoTimeline({
 
   const isUserScrolling = useRef(false);
   const scrollEndTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const dragRef = useRef({ handle: '' as '' | 'start' | 'end', originFrac: 0 });
 
   const halfW = containerW / 2;
   const filmW = Math.max(duration * PX_PER_SEC * zoom, containerW);
   const numThumbs = thumbnails.length;
   const thumbW = numThumbs > 0 ? filmW / numThumbs : 0;
-
-  // Latest props ref for PanResponder closures
-  const pr = useRef({
-    startFrac, endFrac, duration, minTrimSecs, filmW,
-    onStartFracChange, onEndFracChange, onSeek,
-  });
-  pr.current = {
-    startFrac, endFrac, duration, minTrimSecs, filmW,
-    onStartFracChange, onEndFracChange, onSeek,
-  };
 
   const tickCfg = useMemo(() => getTickConfig(zoom), [zoom]);
 
@@ -205,46 +192,7 @@ export default function VideoTimeline({
     return out;
   }, [numThumbs, thumbW, vL, vR, thumbnails]);
 
-  // ─── Trim handle PanResponders ──────────────────────────────────────────────
-  const startPan = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: () => {
-        dragRef.current = { handle: 'start', originFrac: pr.current.startFrac };
-      },
-      onPanResponderMove: (_, g) => {
-        const p = pr.current;
-        const raw = dragRef.current.originFrac + g.dx / p.filmW;
-        const max = p.endFrac - p.minTrimSecs / Math.max(p.duration, 0.001);
-        const v = Math.max(0, Math.min(max, raw));
-        p.onStartFracChange(v);
-        p.onSeek(v * p.duration);
-      },
-    }),
-  ).current;
-
-  const endPan = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: () => {
-        dragRef.current = { handle: 'end', originFrac: pr.current.endFrac };
-      },
-      onPanResponderMove: (_, g) => {
-        const p = pr.current;
-        const raw = dragRef.current.originFrac + g.dx / p.filmW;
-        const min = p.startFrac + p.minTrimSecs / Math.max(p.duration, 0.001);
-        const v = Math.max(min, Math.min(1, raw));
-        p.onEndFracChange(v);
-        p.onSeek(v * p.duration);
-      },
-    }),
-  ).current;
-
-  // ─── Derived px positions ───────────────────────────────────────────────────
-  const startPx = startFrac * filmW;
-  const endPx = endFrac * filmW;
+  // ─── Derived ────────────────────────────────────────────────────────────────
   const curSec =
     duration > 0 ? Math.max(0, Math.min(duration, (scrollX / filmW) * duration)) : 0;
 
@@ -311,63 +259,46 @@ export default function VideoTimeline({
                 />
               ))}
 
-              {/* Dim regions outside trim */}
-              <View style={[styles.dim, { left: 0, width: startPx }]} />
-              <View style={[styles.dim, { left: endPx, right: 0 }]} />
+              {/* Segment overlays */}
+              {segments.map((seg, i) => {
+                const left = seg.startFrac * filmW;
+                const width = (seg.endFrac - seg.startFrac) * filmW;
+                const isSelected = i === selectedSegment;
+                const isDeleted = !seg.kept;
+                return (
+                  <React.Fragment key={`seg-${i}`}>
+                    {/* Deleted segment: red-tinted dim overlay */}
+                    {isDeleted && (
+                      <View
+                        style={[
+                          styles.deletedOverlay,
+                          { left, width },
+                        ]}
+                      />
+                    )}
+                    {/* Selected segment: highlight border */}
+                    {isSelected && (
+                      <View
+                        style={[
+                          styles.selectedOverlay,
+                          { left, width },
+                        ]}
+                      />
+                    )}
+                  </React.Fragment>
+                );
+              })}
 
-              {/* Trim selection border (top + bottom) */}
-              <View
-                style={[
-                  styles.trimBorderH,
-                  {
-                    top: 0,
-                    left: startPx + HANDLE_WIDTH,
-                    width: Math.max(0, endPx - startPx - HANDLE_WIDTH * 2),
-                  },
-                ]}
-              />
-              <View
-                style={[
-                  styles.trimBorderH,
-                  {
-                    bottom: 0,
-                    left: startPx + HANDLE_WIDTH,
-                    width: Math.max(0, endPx - startPx - HANDLE_WIDTH * 2),
-                  },
-                ]}
-              />
-
-              {/* Start handle */}
-              <View
-                style={[
-                  styles.handle,
-                  {
-                    left: startPx,
-                    borderTopLeftRadius: 6,
-                    borderBottomLeftRadius: 6,
-                  },
-                ]}
-                {...startPan.panHandlers}
-                hitSlop={{ top: 16, bottom: 16, left: 20, right: 8 }}
-              >
-                <View style={styles.grip} />
-              </View>
-
-              {/* End handle */}
-              <View
-                style={[
-                  styles.handle,
-                  {
-                    left: endPx - HANDLE_WIDTH,
-                    borderTopRightRadius: 6,
-                    borderBottomRightRadius: 6,
-                  },
-                ]}
-                {...endPan.panHandlers}
-                hitSlop={{ top: 16, bottom: 16, left: 8, right: 20 }}
-              >
-                <View style={styles.grip} />
-              </View>
+              {/* Split lines at segment boundaries (skip 0 and 1) */}
+              {segments.slice(0, -1).map((seg, i) => {
+                const x = seg.endFrac * filmW;
+                return (
+                  <View
+                    key={`split-${i}`}
+                    style={[styles.splitLine, { left: x - 1 }]}
+                  />
+                );
+              })}
             </View>
           </View>
         </ScrollView>
@@ -459,39 +390,33 @@ const styles = StyleSheet.create({
     backgroundColor: '#222',
   },
 
-  // Dim regions
-  dim: {
+  // Segment overlays
+  deletedOverlay: {
     position: 'absolute',
     top: 0,
     bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: 'rgba(255, 50, 50, 0.45)',
     zIndex: 3,
   },
-
-  // Trim borders
-  trimBorderH: {
+  selectedOverlay: {
     position: 'absolute',
-    height: 2,
-    backgroundColor: '#fff',
+    top: 0,
+    bottom: 0,
+    borderWidth: 2,
+    borderColor: '#fff',
+    borderRadius: 4,
+    backgroundColor: 'transparent',
     zIndex: 4,
   },
 
-  // Trim handles
-  handle: {
+  // Split lines
+  splitLine: {
     position: 'absolute',
     top: 0,
     bottom: 0,
-    width: HANDLE_WIDTH,
+    width: 2,
     backgroundColor: '#fff',
-    zIndex: 6,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  grip: {
-    width: 3,
-    height: 18,
-    borderRadius: 1.5,
-    backgroundColor: '#333',
+    zIndex: 5,
   },
 
   // Bottom bar

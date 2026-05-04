@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -10,17 +10,20 @@ import {
 import { Video, ResizeMode, AVPlaybackStatus } from 'expo-av';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../types';
-import { uploadVideo } from '../api/client';
 import VideoTimeline from '../components/VideoTimeline';
+import type { TimelineSegment } from '../components/VideoTimeline';
+import { isFullVideo, filterSegments } from '../lib/videoProcessor';
+import { transcribeVideo } from '../lib/transcribe';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Trim'>;
 
-const MIN_TRIM_SECS = 1;
+const MIN_SPLIT_GAP = 0.5; // minimum seconds between split points
 
 function fmtCompact(secs: number): string {
-  const m = Math.floor(secs / 60);
-  const s = Math.floor(secs % 60);
-  const ms = Math.floor((secs % 1) * 100);
+  const safe = Math.max(0, secs);
+  const m = Math.floor(safe / 60);
+  const s = Math.floor(safe % 60);
+  const ms = Math.floor((safe % 1) * 100);
   return `${m}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
 }
 
@@ -34,19 +37,53 @@ export default function TrimScreen({ navigation, route }: Props) {
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
 
-  // Trim bounds as fractions [0, 1]
-  const [startFrac, setStartFrac] = useState(0);
-  const [endFrac, setEndFrac] = useState(1);
-  const startFracRef = useRef(0);
-  const endFracRef = useRef(1);
-  const durationRef = useRef(paramDuration > 0 ? paramDuration : 0);
+  // Split-based editing state
+  const [splitPoints, setSplitPoints] = useState<number[]>([]);
+  const [deletedSegments, setDeletedSegments] = useState<Set<number>>(new Set());
+  const [selectedSegment, setSelectedSegment] = useState<number | null>(null);
 
-  // Keep refs in sync for playback boundary checks
-  useEffect(() => { startFracRef.current = startFrac; }, [startFrac]);
-  useEffect(() => { endFracRef.current = endFrac; }, [endFrac]);
+  const durationRef = useRef(paramDuration > 0 ? paramDuration : 0);
   useEffect(() => { durationRef.current = duration; }, [duration]);
 
-  // --- Playback ---
+  // ─── Derive segments from split points ──────────────────────────────────────
+
+  const sortedSplits = useMemo(
+    () => [...splitPoints].sort((a, b) => a - b),
+    [splitPoints],
+  );
+
+  const segments: TimelineSegment[] = useMemo(() => {
+    const bounds = [0, ...sortedSplits, 1];
+    const segs: TimelineSegment[] = [];
+    for (let i = 0; i < bounds.length - 1; i++) {
+      segs.push({
+        startFrac: bounds[i],
+        endFrac: bounds[i + 1],
+        kept: !deletedSegments.has(i),
+      });
+    }
+    return segs;
+  }, [sortedSplits, deletedSegments]);
+
+  // Ref for playback callback (avoids stale closure)
+  const segmentsRef = useRef(segments);
+  useEffect(() => { segmentsRef.current = segments; }, [segments]);
+
+  // ─── Auto-select segment based on playhead position ─────────────────────────
+
+  useEffect(() => {
+    if (duration <= 0 || segments.length === 0) return;
+    const frac = currentTime / duration;
+    for (let i = 0; i < segments.length; i++) {
+      if (frac >= segments[i].startFrac && frac < segments[i].endFrac) {
+        setSelectedSegment(i);
+        return;
+      }
+    }
+    setSelectedSegment(segments.length - 1);
+  }, [currentTime, duration, segments]);
+
+  // ─── Playback ───────────────────────────────────────────────────────────────
 
   const onPlaybackStatusUpdate = useCallback((status: AVPlaybackStatus) => {
     if (!status.isLoaded) return;
@@ -62,10 +99,48 @@ export default function TrimScreen({ navigation, route }: Props) {
     setCurrentTime(posSecs);
     setIsPlaying(status.isPlaying ?? false);
 
-    // Stop at end trim boundary
-    if (status.isPlaying && posSecs >= endFracRef.current * durationRef.current - 0.1) {
-      videoRef.current?.pauseAsync();
-      videoRef.current?.setPositionAsync(startFracRef.current * durationRef.current * 1000);
+    // During playback: skip deleted segments, stop at end of last kept segment
+    if (status.isPlaying && durationRef.current > 0) {
+      const frac = posSecs / durationRef.current;
+      const segs = segmentsRef.current;
+
+      // Find current segment
+      const curSeg = segs.find(
+        (s) => frac >= s.startFrac && frac < s.endFrac,
+      );
+
+      if (curSeg && !curSeg.kept) {
+        // In a deleted segment — jump to next kept one
+        const curIdx = segs.indexOf(curSeg);
+        const nextKept = segs.slice(curIdx + 1).find((s) => s.kept);
+        if (nextKept) {
+          videoRef.current?.setPositionAsync(
+            nextKept.startFrac * durationRef.current * 1000,
+          );
+        } else {
+          // No more kept segments — stop
+          videoRef.current?.pauseAsync();
+          const firstKept = segs.find((s) => s.kept);
+          if (firstKept) {
+            videoRef.current?.setPositionAsync(
+              firstKept.startFrac * durationRef.current * 1000,
+            );
+          }
+        }
+        return;
+      }
+
+      // Stop at end of the last kept segment
+      const lastKept = [...segs].reverse().find((s) => s.kept);
+      if (lastKept && frac >= lastKept.endFrac - 0.005) {
+        videoRef.current?.pauseAsync();
+        const firstKept = segs.find((s) => s.kept);
+        if (firstKept) {
+          videoRef.current?.setPositionAsync(
+            firstKept.startFrac * durationRef.current * 1000,
+          );
+        }
+      }
     }
   }, []);
 
@@ -73,57 +148,138 @@ export default function TrimScreen({ navigation, route }: Props) {
     if (isPlaying) {
       await videoRef.current?.pauseAsync();
     } else {
-      const startMs = startFracRef.current * durationRef.current * 1000;
-      const endMs = endFracRef.current * durationRef.current * 1000;
-      const curMs = currentTime * 1000;
-      const seekMs = curMs >= startMs && curMs < endMs ? curMs : startMs;
-      await videoRef.current?.setPositionAsync(seekMs);
+      // Start from the first kept segment if current position is in a deleted one
+      const dur = durationRef.current;
+      const frac = currentTime / dur;
+      const segs = segmentsRef.current;
+      const curSeg = segs.find(
+        (s) => frac >= s.startFrac && frac < s.endFrac,
+      );
+      if (curSeg && !curSeg.kept) {
+        const nextKept = segs.find(
+          (s) => s.startFrac >= curSeg.startFrac && s.kept,
+        );
+        if (nextKept) {
+          await videoRef.current?.setPositionAsync(
+            nextKept.startFrac * dur * 1000,
+          );
+        }
+      }
       await videoRef.current?.playAsync();
     }
   };
 
-  // --- Seek from timeline ---
+  // ─── Seek from timeline ─────────────────────────────────────────────────────
+
   const handleSeek = useCallback(async (seconds: number) => {
     await videoRef.current?.setPositionAsync(seconds * 1000);
   }, []);
 
-  // --- Handle fraction changes (also seek video) ---
-  const handleStartFracChange = useCallback((f: number) => {
-    setStartFrac(f);
-  }, []);
+  // ─── Split at playhead ──────────────────────────────────────────────────────
 
-  const handleEndFracChange = useCallback((f: number) => {
-    setEndFrac(f);
-  }, []);
+  const handleSplit = () => {
+    const dur = durationRef.current;
+    if (dur <= 0) return;
 
-  // --- Upload ---
+    const frac = currentTime / dur;
+    if (frac <= 0.01 || frac >= 0.99) {
+      Alert.alert('Cannot Split', 'Move the playhead away from the edges.');
+      return;
+    }
 
-  const handleContinue = async (skipTrim: boolean) => {
+    // Check not too close to existing splits
+    const tooClose = splitPoints.some(
+      (sp) => Math.abs(sp - frac) < MIN_SPLIT_GAP / dur,
+    );
+    if (tooClose) {
+      Alert.alert('Too Close', 'Move the playhead further from an existing split.');
+      return;
+    }
+
+    setSplitPoints((prev) => [...prev, frac]);
+  };
+
+  // ─── Delete / restore selected segment ──────────────────────────────────────
+
+  const handleDeleteSegment = () => {
+    if (selectedSegment === null) return;
+
+    // Don't allow deleting ALL segments
+    const newDeleted = new Set(deletedSegments);
+    if (newDeleted.has(selectedSegment)) {
+      newDeleted.delete(selectedSegment); // restore
+    } else {
+      // Check we'd still have at least one kept segment
+      const wouldKeep = segments.filter(
+        (s, i) => i !== selectedSegment && s.kept,
+      );
+      if (wouldKeep.length === 0) {
+        Alert.alert('Cannot Delete', 'You must keep at least one section.');
+        return;
+      }
+      newDeleted.add(selectedSegment);
+    }
+    setDeletedSegments(newDeleted);
+  };
+
+  // ─── Reset ──────────────────────────────────────────────────────────────────
+
+  const handleReset = async () => {
+    setSplitPoints([]);
+    setDeletedSegments(new Set());
+    setSelectedSegment(null);
+  };
+
+  // ─── Process locally & continue ─────────────────────────────────────────────
+
+  const handleContinue = async () => {
     setLoading(true);
-    setStatusMsg('Uploading & transcribing with Whisper AI…');
     try {
       const dur = durationRef.current;
-      const start = skipTrim ? undefined : startFracRef.current * dur;
-      const end = skipTrim ? undefined : endFracRef.current * dur;
-      const response = await uploadVideo(videoUri, start, end);
+
+      // Step 1: Transcribe full video with OpenAI Whisper
+      setStatusMsg('Transcribing with Whisper AI…');
+      const { segments: allSrtSegments, srt: fullSrt } =
+        await transcribeVideo(videoUri);
+
+      // Step 2: Filter segments to kept ranges (if any sections were deleted)
+      let finalSegments = allSrtSegments;
+      let finalSrt = fullSrt;
+
+      if (!isFullVideo(segments)) {
+        setStatusMsg('Filtering subtitles…');
+        const filtered = filterSegments(allSrtSegments, segments, dur);
+        finalSegments = filtered.segments;
+        finalSrt = filtered.srt;
+      }
+
       navigation.navigate('SubtitleEditor', {
-        filePath: response.filePath,
-        segments: response.segments,
-        srt: response.srt,
+        filePath: videoUri,
+        segments: finalSegments,
+        srt: finalSrt,
         videoUri,
       });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Upload failed';
-      Alert.alert('Upload Error', `${msg}\n\nMake sure the backend is running.`);
+      const msg = err instanceof Error ? err.message : 'Processing failed';
+      Alert.alert('Error', msg);
       setStatusMsg('');
     } finally {
       setLoading(false);
     }
   };
 
-  // --- Derived ---
-  const trimDuration = (endFrac - startFrac) * duration;
+  // ─── Derived ────────────────────────────────────────────────────────────────
+
   const playheadFrac = duration > 0 ? currentTime / duration : 0;
+  const keptDuration = segments
+    .filter((s) => s.kept)
+    .reduce((sum, s) => sum + (s.endFrac - s.startFrac) * duration, 0);
+  const hasSplits = splitPoints.length > 0;
+  const hasDeleted = deletedSegments.size > 0;
+  const selSeg = selectedSegment !== null ? segments[selectedSegment] : null;
+  const selIsDeleted = selSeg ? !selSeg.kept : false;
+
+  // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <View style={styles.container}>
@@ -139,7 +295,7 @@ export default function TrimScreen({ navigation, route }: Props) {
         useNativeControls={false}
       />
 
-      {/* ── Controls bar (CapCut-style) ── */}
+      {/* ── Controls bar ── */}
       <View style={styles.controlsBar}>
         <View style={styles.controlsSide}>
           <Text style={styles.timeText}>
@@ -147,7 +303,7 @@ export default function TrimScreen({ navigation, route }: Props) {
             <Text style={styles.timeDim}> / {fmtCompact(duration)}</Text>
           </Text>
         </View>
- 
+
         <TouchableOpacity
           style={styles.playBtn}
           onPress={togglePlay}
@@ -156,68 +312,97 @@ export default function TrimScreen({ navigation, route }: Props) {
         >
           <Text style={styles.playIcon}>{isPlaying ? '⏸' : '▶'}</Text>
         </TouchableOpacity>
- 
+
         <View style={[styles.controlsSide, styles.controlsSideRight]}>
-          <Text style={styles.trimBadge}>
-            {fmtCompact(trimDuration)}
+          <Text style={styles.keptBadge}>
+            {hasDeleted ? `Kept: ${fmtCompact(keptDuration)}` : fmtCompact(duration)}
           </Text>
         </View>
       </View>
 
-      {/* ── Zoomable Timeline ── */}
+      {/* ── Timeline ── */}
       <VideoTimeline
         videoUri={videoUri}
         duration={duration}
-        startFrac={startFrac}
-        endFrac={endFrac}
+        segments={segments}
+        selectedSegment={selectedSegment}
         playheadFrac={playheadFrac}
-        onStartFracChange={handleStartFracChange}
-        onEndFracChange={handleEndFracChange}
         onSeek={handleSeek}
-        minTrimSecs={MIN_TRIM_SECS}
       />
+
+      {/* ── Segment info ── */}
+      <View style={styles.infoRow}>
+        {hasSplits && selectedSegment !== null && selSeg ? (
+          <Text style={styles.infoText}>
+            Section {selectedSegment + 1}/{segments.length}
+            {'  •  '}
+            {fmtCompact(selSeg.startFrac * duration)} → {fmtCompact(selSeg.endFrac * duration)}
+            {'  •  '}
+            <Text style={{ color: selIsDeleted ? '#ff5252' : '#4caf50' }}>
+              {selIsDeleted ? 'Deleted' : 'Kept'}
+            </Text>
+          </Text>
+        ) : (
+          <Text style={styles.hintText}>
+            Scroll to position the line, then press Split
+          </Text>
+        )}
+      </View>
 
       {/* ── Status / loading ── */}
       {loading && (
         <View style={styles.loadingRow}>
-           <ActivityIndicator color="#fff" size="small" />
+          <ActivityIndicator color="#fff" size="small" />
           <Text style={styles.statusText}>{statusMsg}</Text>
         </View>
       )}
 
-      {/* ── Bottom toolbar (CapCut-style) ── */}
+      {/* ── Bottom toolbar ── */}
       <View style={styles.bottomToolbar}>
         <View style={styles.toolbarDivider} />
         <View style={styles.toolbarRow}>
+          {/* Reset */}
           <TouchableOpacity
             style={[styles.toolbarItem, loading && styles.disabled]}
-            onPress={() => handleContinue(true)}
+            onPress={handleReset}
+            disabled={loading || !hasSplits}
+          >
+            <Text style={[styles.toolbarIcon, !hasSplits && styles.iconDim]}>↺</Text>
+            <Text style={[styles.toolbarLabel, !hasSplits && styles.labelDim]}>Reset</Text>
+          </TouchableOpacity>
+
+          {/* Split */}
+          <TouchableOpacity
+            style={[styles.toolbarItem, loading && styles.disabled]}
+            onPress={handleSplit}
             disabled={loading}
           >
-            <Text style={styles.toolbarIcon}>▶️</Text>
-            <Text style={styles.toolbarLabel}>Full Video</Text>
+            <Text style={styles.toolbarIcon}>✂️</Text>
+            <Text style={[styles.toolbarLabel, styles.toolbarLabelActive]}>Split</Text>
           </TouchableOpacity>
- 
+
+          {/* Delete / Restore */}
           <TouchableOpacity
             style={[styles.toolbarItem, loading && styles.disabled]}
-            onPress={() => handleContinue(false)}
+            onPress={handleDeleteSegment}
+            disabled={loading || selectedSegment === null || !hasSplits}
+          >
+            <Text style={[styles.toolbarIcon, (!hasSplits) && styles.iconDim]}>
+              {selIsDeleted ? '↩' : '🗑️'}
+            </Text>
+            <Text style={[styles.toolbarLabel, (!hasSplits) && styles.labelDim]}>
+              {selIsDeleted ? 'Restore' : 'Delete'}
+            </Text>
+          </TouchableOpacity>
+
+          {/* Continue → upload */}
+          <TouchableOpacity
+            style={[styles.toolbarItem, loading && styles.disabled]}
+            onPress={handleContinue}
             disabled={loading}
           >
             {loading ? (
-              <ActivityIndicator color="#fff" size="small" style={{ height: 24 }} />
-            ) : (
-              <Text style={styles.toolbarIcon}>✂️</Text>
-            )}
-            <Text style={[styles.toolbarLabel, styles.toolbarLabelActive]}>Trim</Text>
-          </TouchableOpacity>
- 
-          <TouchableOpacity
-            style={[styles.toolbarItem, loading && styles.disabled]}
-            onPress={() => handleContinue(false)}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color="#fff" size="small" style={{ height: 24 }} />
+              <ActivityIndicator color="#fff" size="small" style={{ height: 26 }} />
             ) : (
               <Text style={styles.toolbarIcon}>→</Text>
             )}
@@ -229,6 +414,8 @@ export default function TrimScreen({ navigation, route }: Props) {
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -239,7 +426,8 @@ const styles = StyleSheet.create({
     aspectRatio: 16 / 9,
     backgroundColor: '#000',
   },
-  // Controls bar (below video, above timeline)
+
+  // Controls bar
   controlsBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -274,10 +462,26 @@ const styles = StyleSheet.create({
     fontSize: 20,
     color: '#fff',
   },
-  trimBadge: {
+  keptBadge: {
     color: '#888',
     fontSize: 12,
     fontVariant: ['tabular-nums'],
+  },
+
+  // Info row
+  infoRow: {
+    alignItems: 'center',
+    marginTop: 8,
+    paddingHorizontal: 16,
+  },
+  infoText: {
+    color: '#bbb',
+    fontSize: 12,
+    fontVariant: ['tabular-nums'],
+  },
+  hintText: {
+    color: '#555',
+    fontSize: 12,
   },
 
   // Loading
@@ -296,7 +500,8 @@ const styles = StyleSheet.create({
 
   // Bottom toolbar
   bottomToolbar: {
-    marginTop: 'auto',paddingBottom: 16,
+    marginTop: 'auto',
+    paddingBottom: 16,
   },
   toolbarDivider: {
     height: 0.5,
@@ -307,15 +512,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-around',
     alignItems: 'center',
-    paddingHorizontal: 24,
+    paddingHorizontal: 12,
     paddingVertical: 8,
   },
   toolbarItem: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: 10,
     paddingVertical: 6,
-    minWidth: 64,
+    minWidth: 56,
   },
   toolbarIcon: {
     fontSize: 22,
@@ -329,6 +534,12 @@ const styles = StyleSheet.create({
   },
   toolbarLabelActive: {
     color: '#fff',
+  },
+  iconDim: {
+    opacity: 0.3,
+  },
+  labelDim: {
+    opacity: 0.3,
   },
   disabled: {
     opacity: 0.4,

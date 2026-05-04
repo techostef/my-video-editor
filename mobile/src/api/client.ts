@@ -15,11 +15,15 @@ export async function uploadVideo(
   startTime?: number,
   endTime?: number
 ): Promise<UploadResponse> {
-  const fileResponse = await fetch(videoUri);
-  const blob = await fileResponse.blob();
-
   const formData = new FormData();
-  formData.append('video', blob, 'video.mp4');
+
+  // React Native requires { uri, name, type } — NOT a Blob
+  formData.append('video', {
+    uri: videoUri,
+    name: 'video.mp4',
+    type: 'video/mp4',
+  } as unknown as Blob);
+
   if (startTime !== undefined) formData.append('startTime', String(startTime));
   if (endTime !== undefined) formData.append('endTime', String(endTime));
 

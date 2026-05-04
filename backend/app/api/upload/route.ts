@@ -19,7 +19,9 @@ export async function POST(req: NextRequest) {
 
   try {
     const formData = await req.formData();
+    console.log("formData", formData);
     const file = formData.get('video');
+    console.log("file", file);
 
     if (!file || typeof file === 'string') {
       return withCors(NextResponse.json({ error: 'No video file provided' }, { status: 400 }));
